@@ -1,12 +1,176 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-// 固定OpenZeppelin版本为4.9.6（Remix会自动拉取）
-import "@openzeppelin/contracts@4.9.6/access/AccessControlEnumerable.sol";
-import "@openzeppelin/contracts@4.9.6/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts@4.9.6/token/ERC20/utils/SafeERC20.sol";
+// ========== 手动整合的OpenZeppelin核心代码（修复_roleMembers访问权限） ==========
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+}
 
-// PancakeSwap V2 核心接口（获取交易对+价格）
+abstract contract AccessControl is Context {
+    bytes32 public constant DEFAULT_ADMIN_ROLE = 0x00;
+
+    mapping(bytes32 => mapping(address => bool)) private _roles;
+    // 核心修复：private → internal，子类可访问
+    mapping(bytes32 => address[]) internal _roleMembers;
+
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+
+    modifier onlyRole(bytes32 role) {
+        require(hasRole(role, _msgSender()), "AccessControl: account missing role");
+        _;
+    }
+
+    function hasRole(bytes32 role, address account) public view returns (bool) {
+        return _roles[role][account];
+    }
+
+    function _grantRole(bytes32 role, address account) internal virtual returns (bool) {
+        if (!hasRole(role, account)) {
+            _roles[role][account] = true;
+            _roleMembers[role].push(account);
+            emit RoleGranted(role, account, _msgSender());
+            return true;
+        }
+        return false;
+    }
+
+    function _revokeRole(bytes32 role, address account) internal virtual {
+        if (hasRole(role, account)) {
+            _roles[role][account] = false;
+            emit RoleRevoked(role, account, _msgSender());
+        }
+    }
+}
+
+abstract contract AccessControlEnumerable is AccessControl {
+    function getRoleMember(bytes32 role, uint256 index) public view returns (address) {
+        require(index < _roleMembers[role].length, "AccessControlEnumerable: index out of bounds");
+        return _roleMembers[role][index];
+    }
+
+    function getRoleMemberCount(bytes32 role) public view returns (uint256) {
+        return _roleMembers[role].length;
+    }
+
+    function _grantRole(bytes32 role, address account) internal virtual override returns (bool) {
+        bool success = super._grantRole(role, account);
+        return success;
+    }
+}
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+}
+
+library SafeERC20 {
+    function safeTransfer(IERC20 token, address to, uint256 value) internal {
+        require(token.transfer(to, value), "SafeERC20: transfer failed");
+    }
+
+    function safeTransferFrom(IERC20 token, address from, address to, uint256 value) internal {
+        require(token.transferFrom(from, to, value), "SafeERC20: transferFrom failed");
+    }
+}
+
+contract ERC20 is Context, IERC20 {
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 private _totalSupply;
+    string private _name;
+    string private _symbol;
+
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
+    }
+
+    function name() public view returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public view returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public view virtual returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() public view override returns (uint256) {
+        return _totalSupply;
+    }
+
+    function balanceOf(address account) public view override returns (uint256) {
+        return _balances[account];
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        address owner = _msgSender();
+        _transfer(owner, to, amount);
+        return true;
+    }
+
+    function allowance(address owner, address spender) public view override returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        address owner = _msgSender();
+        _approve(owner, spender, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(from, spender, amount);
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    function _transfer(address from, address to, uint256 amount) internal virtual {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+        uint256 fromBalance = _balances[from];
+        require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+        _balances[from] = fromBalance - amount;
+        _balances[to] += amount;
+        emit Transfer(from, to, amount);
+    }
+
+    function _mint(address account, uint256 amount) internal virtual {
+        require(account != address(0), "ERC20: mint to the zero address");
+        _totalSupply += amount;
+        _balances[account] += amount;
+        emit Transfer(address(0), account, amount);
+    }
+
+    function _approve(address owner, address spender, uint256 amount) internal virtual {
+        require(owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+        _allowances[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    function _spendAllowance(address owner, address spender, uint256 amount) internal virtual {
+        uint256 currentAllowance = allowance(owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            _approve(owner, spender, currentAllowance - amount);
+        }
+    }
+}
+
+// ========== PancakeSwap V2 接口 ==========
 interface IUniswapV2Router02 {
     function factory() external pure returns (address);
     function getAmountsOut(uint256 amountIn, address[] memory path) external view returns (uint256[] memory amounts);
@@ -22,15 +186,10 @@ interface IUniswapV2Pair {
     function token1() external view returns (address);
 }
 
-/**
- * @title CRM
- * @dev 修复编译错误版：适配OpenZeppelin 4.9.6 + 修复核心逻辑错误
- * 功能：买入开关+1U价格限制+白名单特权+精准手续费监听
- */
+// ========== CRM合约核心逻辑 ==========
 contract CRM is ERC20, AccessControlEnumerable {
     using SafeERC20 for IERC20;
 
-    // ========== 核心状态变量 ==========
     address public routerAddress;
     address public pairAddress;
     address public usdtAddress;       
@@ -38,11 +197,9 @@ contract CRM is ERC20, AccessControlEnumerable {
     address public gudiAddress2;      
     uint256 public buyPercent;        
     uint256 public sellPercent;       
-
     bool public buyEnabled;           
     mapping(address => bool) public whitelist; 
 
-    // ========== 事件定义 ==========
     event BuyFeeDeducted(address indexed from, address indexed to, uint256 indexed feeAmount, uint256 totalAmount);
     event SellFeeDeducted(address indexed from, address indexed to, uint256 indexed feeAmount, uint256 totalAmount);
     event ConfigUpdated(address indexed gudi1, address indexed gudi2, uint256 buyFee, uint256 sellFee);
@@ -50,43 +207,28 @@ contract CRM is ERC20, AccessControlEnumerable {
     event WhitelistAdded(address indexed user);
     event WhitelistRemoved(address indexed user);
 
-    // ========== 构造函数（修复所有编译错误） ==========
     constructor() ERC20("Core RDA Matrix", "CRM") {
-        // 1. 初始发行量：1000亿枚（18位小数）
         uint256 initialSupply = 10000000000 * 10 ** decimals();
         _mint(_msgSender(), initialSupply);
-
-        // 2. 部署者授予最高管理员权限（适配低版本OpenZeppelin，无返回值）
         _grantRole(DEFAULT_ADMIN_ROLE, _msgSender());
 
-        // 3. 链ID适配：BSC测试网(97) / 主网(56)
         if (block.chainid == 97) {
-            routerAddress = 0xD99D1c33F9fC3444f8101754aBC46c52416550D1;  // 测试网PancakeSwap路由
-            usdtAddress = 0x337610d27c682E347C9cD60BD4b3b107C9d34dDd;    // 测试网USDT
+            routerAddress = 0xD99D1c33F9fC3444f8101754aBC46c52416550D1;
+            usdtAddress = 0x337610d27c682E347C9cD60BD4b3b107C9d34dDd;
         } else {
-            routerAddress = 0x10ED43C718714eb63d5aA57B78B54704E256024E;  // 主网PancakeSwap路由
-            usdtAddress = 0x55d398326f99059fF775485246999027B3197955;    // 主网USDT
+            routerAddress = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
+            usdtAddress = 0x55d398326f99059fF775485246999027B3197955;
         }
 
-        // 4. 手续费接收地址初始配置
         gudiAddress1 = 0x5E43159eF999537080E66EBffA09672484162906;
         gudiAddress2 = 0x28f7056ab66024f5B719175b2314F48c8B35D694;
-
-        // 5. 手续费比例初始配置（3%）
         buyPercent = 300;
         sellPercent = 300;
-
-        // 6. 新增功能初始化：上线默认禁止买入
         buyEnabled = false;
         pairAddress = address(0);
     }
 
-    // ========== 核心转账逻辑（修复safeTransferFrom错误） ==========
-    function _transfer(
-        address from,
-        address to,
-        uint256 amount
-    ) internal override {
+    function _transfer(address from, address to, uint256 amount) internal override {
         if (pairAddress == address(0)) {
             pairAddress = IUniswapV2Factory(IUniswapV2Router02(routerAddress).factory()).getPair(address(this), usdtAddress);
         }
@@ -104,7 +246,6 @@ contract CRM is ERC20, AccessControlEnumerable {
         }
     }
 
-    // ========== 买入交易处理（修复手续费转账逻辑） ==========
     function _handleBuy(address from, address to, uint256 amount) internal {
         if (whitelist[to]) {
             super._transfer(from, to, amount);
@@ -116,17 +257,13 @@ contract CRM is ERC20, AccessControlEnumerable {
         require(crmPrice >= 1 * 10 ** 18, "CRM: price < 1U, buy forbidden");
 
         uint256 fee = amount * buyPercent / 10000;
-        uint256 transferAmount = amount - fee;
-
-        // 修复：内部转账用_safeTransfer（替代错误的safeTransferFrom）
         if (fee > 0) {
             super._transfer(from, gudiAddress1, fee);
-            emit BuyFeeDeducted(from, to, fee, amount);
         }
-        super._transfer(from, to, transferAmount);
+        emit BuyFeeDeducted(from, to, fee, amount);
+        super._transfer(from, to, amount - fee);
     }
 
-    // ========== 卖出交易处理（修复手续费转账逻辑） ==========
     function _handleSell(address from, address to, uint256 amount) internal {
         if (whitelist[from]) {
             super._transfer(from, to, amount);
@@ -134,16 +271,13 @@ contract CRM is ERC20, AccessControlEnumerable {
         }
 
         uint256 fee = amount * sellPercent / 10000;
-        uint256 transferAmount = amount - fee;
-
         if (fee > 0) {
             super._transfer(from, gudiAddress2, fee);
-            emit SellFeeDeducted(from, to, fee, amount);
         }
-        super._transfer(from, to, transferAmount);
+        emit SellFeeDeducted(from, to, fee, amount);
+        super._transfer(from, to, amount - fee);
     }
 
-    // ========== 核心工具函数：获取CRM的USDT价格 ==========
     function getCrmPriceInUsdt() public view returns (uint256) {
         address crmUsdtPair = IUniswapV2Factory(IUniswapV2Router02(routerAddress).factory()).getPair(address(this), usdtAddress);
         require(crmUsdtPair != address(0), "CRM: CRM-USDT pair not exist");
@@ -157,7 +291,6 @@ contract CRM is ERC20, AccessControlEnumerable {
         return (usdtReserve * 10 ** 18) / crmReserve;
     }
 
-    // ========== 管理员核心功能（复用AccessControl内置的DEFAULT_ADMIN_ROLE） ==========
     function setBuyEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
         buyEnabled = _enabled;
         emit BuyEnabledUpdated(_enabled);
@@ -210,6 +343,5 @@ contract CRM is ERC20, AccessControlEnumerable {
         }
     }
 
-    // ========== 接收BNB函数 ==========
     receive() external payable {}
 }
